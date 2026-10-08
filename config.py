@@ -37,10 +37,14 @@ class Config:
         )
     )
     ollama_host: str = field(
-        default_factory=lambda: os.getenv("CODESAGE_OLLAMA_HOST", "http://localhost:11434")
+        default_factory=lambda: os.getenv(
+            "CODESAGE_OLLAMA_HOST", os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        )
     )
     ollama_model: str = field(
-        default_factory=lambda: os.getenv("CODESAGE_OLLAMA_MODEL", "llama3")
+        default_factory=lambda: os.getenv(
+            "CODESAGE_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+        )
     )
     chroma_path: Path = field(
         default_factory=lambda: _resolve_path(os.getenv("CODESAGE_CHROMA_PATH", "chroma_db"))

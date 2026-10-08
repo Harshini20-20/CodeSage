@@ -1,21 +1,132 @@
-"""Retrieval interface (placeholder - not implemented yet)."""
+"""Retrieval engine for CodeSage (Phase 1F).
+
+Connects the embedding layer and the vector store::
+
+    Retriever -> Embedder.embed_query() -> VectorStore.query() -> RetrievalResult
+
+Design notes
+------------
+* The Retriever never touches ChromaDB; it only talks to the ``Embedder`` and
+  ``VectorStore`` objects it is given (dependency injection), so tests can pass
+  fakes. The real classes are imported for type checking only, which keeps this
+  module free of any ChromaDB / PyTorch import.
+* Ordering and distance are exactly what the vector store returned. There is no
+  re-ranking and no invented similarity score.
+* Retrieved code is only ever treated as text; nothing is executed.
+* Only invalid *user input* raises :class:`RetrievalInputError`. Failures from
+  the embedder or vector store propagate unchanged.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional
 
-from src.embedder import Embedder
-from src.vectordb import VectorStore
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids importing chromadb
+    from src.embedder import Embedder
+    from src.vectordb import VectorStore
+
+DEFAULT_TOP_K: int = 5
 
 
+# --------------------------------------------------------------------------- #
+# Errors
+# --------------------------------------------------------------------------- #
+class RetrievalError(Exception):
+    """Base class for retrieval errors."""
+
+
+class RetrievalInputError(RetrievalError, ValueError):
+    """The query or ``top_k`` passed to the retriever is invalid."""
+
+
+# --------------------------------------------------------------------------- #
+# Result
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class RetrievalResult:
+    """One retrieved code chunk.
+
+    ``distance`` is the raw vector-store distance (cosine distance for the
+    default collection): lower means closer. ``metadata`` is a copy of the full
+    metadata dict stored with the chunk. Fields missing from the metadata fall
+    back to ``""`` (text) or ``None`` (line numbers).
+    """
+
+    chunk_id: str
+    content: str
+    file_path: str = ""
+    chunk_type: str = ""
+    name: str = ""
+    qualified_name: str = ""
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    distance: Optional[float] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# Retriever
+# --------------------------------------------------------------------------- #
 class Retriever:
-    """Placeholder interface for retrieving relevant code chunks."""
+    """Turns a natural-language query into ranked :class:`RetrievalResult` objects.
 
-    def __init__(self, embedder: Embedder, store: VectorStore, top_k: int = 5) -> None:
+    Args:
+        embedder: Object with ``embed_query(query) -> list[float]``.
+        vector_store: Object with ``query(embedding, top_k) -> list[dict]``
+            where each dict has ``id``, ``document``, ``metadata``, ``distance``.
+    """
+
+    def __init__(self, embedder: Embedder, vector_store: VectorStore) -> None:
         self.embedder = embedder
-        self.store = store
-        self.top_k = top_k
+        self.vector_store = vector_store
 
-    def retrieve(self, query: str) -> list[dict[str, Any]]:
-        """Return chunks relevant to the query."""
-        raise NotImplementedError("Retrieval is not implemented yet.")
+    def retrieve(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[RetrievalResult]:
+        """Return up to ``top_k`` chunks most relevant to ``query``.
+
+        Results keep the exact order returned by the vector store. An empty
+        store yields ``[]``.
+
+        Raises:
+            RetrievalInputError: ``query`` is not a non-blank string, or
+                ``top_k`` is not a positive integer.
+        """
+        self._validate_query(query)
+        self._validate_top_k(top_k)
+
+        embedding = self.embedder.embed_query(query)
+        raw_results = self.vector_store.query(embedding, top_k=top_k)
+        return [self._to_result(raw) for raw in raw_results]
+
+    # ----- internals ------------------------------------------------------- #
+    @staticmethod
+    def _validate_query(query: Any) -> None:
+        if not isinstance(query, str):
+            raise RetrievalInputError(f"query must be a string, got {type(query).__name__}.")
+        if not query.strip():
+            raise RetrievalInputError("query must not be empty or whitespace only.")
+
+    @staticmethod
+    def _validate_top_k(top_k: Any) -> None:
+        # bool is a subclass of int; True/False are not meaningful counts.
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            raise RetrievalInputError(f"top_k must be an integer, got {type(top_k).__name__}.")
+        if top_k <= 0:
+            raise RetrievalInputError(f"top_k must be greater than zero, got {top_k}.")
+
+    @staticmethod
+    def _to_result(raw: dict[str, Any]) -> RetrievalResult:
+        """Convert one raw vector-store record into a RetrievalResult."""
+        metadata = dict(raw.get("metadata") or {})
+        return RetrievalResult(
+            chunk_id=raw.get("id", ""),
+            content=raw.get("document") or "",
+            file_path=str(metadata.get("file_path", "")),
+            chunk_type=str(metadata.get("chunk_type", "")),
+            name=str(metadata.get("name", "")),
+            qualified_name=str(metadata.get("qualified_name", "")),
+            start_line=metadata.get("start_line"),
+            end_line=metadata.get("end_line"),
+            distance=raw.get("distance"),
+            metadata=metadata,
+        )

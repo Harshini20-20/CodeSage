@@ -79,6 +79,13 @@ The default model is `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, r
 
 On Linux, pip may install a CUDA build of PyTorch by default. For a smaller CPU-only install: `pip install torch --index-url https://download.pytorch.org/whl/cpu` before `pip install -r requirements.txt`. On Windows the default PyTorch wheel is already CPU-only.
 
+### Ollama LLM
+CodeSage uses local Ollama for LLM generation (no cloud APIs or external keys required).
+- The model is configurable via `CODESAGE_OLLAMA_MODEL` (default: `llama3`) or `OLLAMA_MODEL`.
+- The Ollama host URL is configurable via `CODESAGE_OLLAMA_HOST` (default: `http://localhost:11434`) or `OLLAMA_HOST`.
+- Ollama must be installed and running on the host machine for actual response generation.
+- The LLM integration layer (`src/llm.py`) strictly handles model communication and text generation; it does not perform retrieval or construct RAG prompts.
+
 ### Run tests
 ```bash
 python -m pytest
@@ -89,8 +96,10 @@ The embedder tests use a tiny locally built Sentence Transformers model (no down
 ```bash
 streamlit run app.py
 ```
+Make sure the local Ollama daemon is running (`ollama serve`) with the configured model pulled (e.g. `ollama pull llama3`) for actual AI explanation generation.
 
 ## Current Implementation Status
-**Foundation + code parsing + code chunking + embedding generation.** Done: project structure, configuration, logging, placeholder module interfaces, Streamlit shell (Upload Code / Ask Code / Documentation), foundation tests, and `src/parser.py` (static AST parsing of Python files: imports, functions, classes, methods, line numbers, graceful error handling) and `src/chunker.py` (parsed code → deterministic, metadata-rich chunks: imports, functions, classes, methods, module-level code, fallback for syntax-error files) and `src/embedder.py` (CodeChunk → embedding vector with Sentence Transformers, CPU by default, model loaded once per `Embedder`), each with tests.
+**Foundation + AST Parser + Code Chunker + Embeddings + ChromaDB + Retrieval + Ollama LLM + RAG Pipeline + Streamlit UI (Phase 1A through 1I completed).**
+Done: AST parsing, deterministic chunking, sentence embeddings, vector database, similarity retrieval, local Ollama integration, RAG pipeline orchestration, and the interactive Streamlit web application (`app.py`) for uploading, indexing, and querying codebases.
 
-**Not implemented yet:** ChromaDB storage, retrieval, Ollama integration, the RAG pipeline. Uploaded files are only saved as data and are never executed.
+**Not implemented yet:** Phase 1J (final end-to-end polish, benchmarking, and packaging). Uploaded files are only saved as data and are never executed.
