@@ -48,11 +48,21 @@ def build_graph_chunk_lookup(
         chunk_type = str(chunk.chunk_type)
         if chunk_type not in _ELEMENT_KINDS:
             continue
-        key = (file_path, chunk_type, str(chunk.qualified_name), int(chunk.start_line))
+
+        key = (
+            file_path,
+            chunk_type,
+            str(chunk.qualified_name),
+            int(chunk.start_line),
+        )
         for node_id in nodes_by_key.get(key, []):
+            content = getattr(chunk, "text", None)
+            if content is None:
+                content = getattr(chunk, "source", "")
+
             lookup[node_id] = RetrievalResult(
                 chunk_id=str(chunk.chunk_id),
-                content=str(getattr(chunk, "text", chunk.source)),
+                content=str(content),
                 file_path=str(chunk.file_path),
                 chunk_type=chunk_type,
                 name=str(chunk.name),
@@ -90,8 +100,8 @@ def expand_with_graph(
     """Append up to ``limit`` connected chunks after the vector-ranked seeds.
 
     Direct resolved calls and inheritance are preferred, followed by class
-    containment and imported-module context. Unresolved symbols are ignored.
-    Original results retain their exact order and are never duplicated.
+    containment and explicitly imported symbol context. Original results retain
+    their exact order and are not duplicated by graph expansion.
     """
     if not results or graph is None or not chunk_lookup or limit <= 0:
         return list(results)
@@ -106,56 +116,82 @@ def expand_with_graph(
         seed_node = graph.nodes.get(seed_id)
         if seed_node is None:
             continue
-        # Calls and inheritance are useful in both directions: dependencies and callers.
+
+        # Calls and inheritance are useful in both directions: dependencies
+        # and callers. Unresolved calls are not reliable enough to expand.
         for edge in graph.edges:
             if edge.kind not in {"calls", "inherits", "contains"}:
                 continue
             if edge.kind == "calls" and not edge.metadata.get("resolved", False):
                 continue
+
             if edge.source == seed_id:
                 neighbor_id = edge.target
             elif edge.target == seed_id:
                 neighbor_id = edge.source
             else:
                 continue
+
             neighbor = graph.nodes.get(neighbor_id)
-            if neighbor is None or neighbor.kind not in _ELEMENT_KINDS or neighbor_id not in chunk_lookup:
+            if (
+                neighbor is None
+                or neighbor.kind not in _ELEMENT_KINDS
+                or neighbor_id not in chunk_lookup
+            ):
                 continue
             if chunk_lookup[neighbor_id].chunk_id in existing_ids:
                 continue
+
             rank = _RELATION_PRIORITY[edge.kind]
             old = candidates.get(neighbor_id)
-            relation = edge.kind
             if old is None or rank < old[0]:
-                candidates[neighbor_id] = (rank, relation)
+                candidates[neighbor_id] = (rank, edge.kind)
 
-        # Imported-module context is a lower-priority fallback. Add only element
-        # nodes from directly imported local files; the result limit bounds noise.
+        # Import context is a lower-priority fallback. Only consider symbols
+        # explicitly listed on the import edge; do not add every element from
+        # the imported file.
         file_id = f"file:{seed_node.file_path}"
         for edge in graph.outgoing(file_id, "imports"):
+            imported_names = set(edge.metadata.get("imported_names", []))
+            if not imported_names:
+                continue
+
             target_file = graph.nodes.get(edge.target)
             if target_file is None:
                 continue
+
             for neighbor in graph.nodes.values():
                 if neighbor.file_path != target_file.file_path:
                     continue
-                if neighbor.kind not in _ELEMENT_KINDS or neighbor.id not in chunk_lookup:
+                if neighbor.kind not in _ELEMENT_KINDS:
+                    continue
+                if neighbor.id not in chunk_lookup:
+                    continue
+                if neighbor.name not in imported_names:
                     continue
                 if chunk_lookup[neighbor.id].chunk_id in existing_ids:
                     continue
-                candidates.setdefault(neighbor.id, (_RELATION_PRIORITY["imports"], "imports"))
+
+                candidates.setdefault(
+                    neighbor.id,
+                    (_RELATION_PRIORITY["imports"], "imports"),
+                )
 
     ordered = sorted(candidates.items(), key=lambda item: (item[1][0], item[0]))
     expanded: list[RetrievalResult] = []
+
     for node_id, (_, relation) in ordered:
         if len(expanded) >= limit:
             break
+
         source = chunk_lookup[node_id]
         if source.chunk_id in existing_ids:
             continue
+
         metadata = dict(source.metadata)
         metadata["graph_relation"] = relation
         metadata["graph_node_id"] = node_id
+
         expanded.append(
             RetrievalResult(
                 chunk_id=source.chunk_id,
@@ -171,6 +207,7 @@ def expand_with_graph(
             )
         )
         existing_ids.add(source.chunk_id)
+
     return list(results) + expanded
 
 
