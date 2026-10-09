@@ -395,3 +395,21 @@ def test_foundation_ask_placeholder_still_raises_not_implemented() -> None:
         pipe.ask("hi")
     with pytest.raises(NotImplementedError):
         pipe.ingest([Path("some/file.py")])
+
+
+
+def test_pipeline_flags_invalid_source_citations(fake_retriever: FakeRetriever) -> None:
+    fake_llm = FakeLLM(answer="This function calls another function [SOURCE 9].")
+    result = RAGPipeline(retriever=fake_retriever, llm=fake_llm).answer("What calls what?")
+
+    assert result.invalid_source_references == [9]
+    assert "[SOURCE 9]" not in result.answer
+    assert "Evidence note" in result.answer
+
+
+def test_pipeline_preserves_valid_source_citations(fake_retriever: FakeRetriever) -> None:
+    fake_llm = FakeLLM(answer="This function is defined here [SOURCE 1].")
+    result = RAGPipeline(retriever=fake_retriever, llm=fake_llm).answer("Where is it?")
+
+    assert result.invalid_source_references == []
+    assert "[SOURCE 1]" in result.answer

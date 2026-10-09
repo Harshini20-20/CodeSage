@@ -195,3 +195,43 @@ def test_resolves_local_class_constructor_call(tmp_path):
     call = next(edge for edge in graph.edges_of_kind("calls") if edge.metadata["call_name"] == "Worker")
     assert call.metadata["resolved"] is True
     assert graph.nodes[call.target].kind == "class"
+
+def test_does_not_create_false_call_relationship_between_sibling_functions(tmp_path):
+    (tmp_path / "calculator.py").write_text(
+        "def add(a, b):\n"
+        "    return a + b\n\n"
+        "def multiply(a, b):\n"
+        "    return a * b\n\n"
+        "def main():\n"
+        "    total = add(10, 5)\n"
+        "    product = multiply(10, 5)\n"
+        "    print(total, product)\n",
+        encoding="utf-8",
+    )
+
+    graph = build_repository_graph(_parse_tree(tmp_path), root=tmp_path)
+
+    function_nodes = {
+        node.name: node.id
+        for node in graph.nodes_of_kind("function")
+    }
+    call_edges = graph.edges_of_kind("calls")
+
+    # main() calls both add() and multiply().
+    assert any(
+        edge.source == function_nodes["main"]
+        and edge.target == function_nodes["add"]
+        for edge in call_edges
+    )
+    assert any(
+        edge.source == function_nodes["main"]
+        and edge.target == function_nodes["multiply"]
+        for edge in call_edges
+    )
+
+    # multiply() must not be recorded as calling add().
+    assert not any(
+        edge.source == function_nodes["multiply"]
+        and edge.target == function_nodes["add"]
+        for edge in call_edges
+    )

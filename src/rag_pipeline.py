@@ -3,13 +3,13 @@
 Connects retrieval and LLM generation:
 
     User Question
-          ↓
+          |
       Retriever -> list[RetrievalResult]
-          ↓
+          |
     Prompt Construction (with instructions & formatted code)
-          ↓
+          |
          LLM -> Answer
-          ↓
+          |
       RAGResult(answer=..., sources=...)
 
 Design notes
@@ -25,7 +25,7 @@ Design notes
 """
 
 from __future__ import annotations
-
+from src.relationship_answers import answer_relationship_question
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
@@ -36,6 +36,8 @@ from src.prompts import (
     format_context,
 )
 from src.retriever import DEFAULT_TOP_K, RetrievalResult
+from src.relationship_context import build_relationship_context
+from src.answer_evidence import validate_source_citations
 from src.utils import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -77,6 +79,7 @@ class RAGResult:
     answer: str
     sources: list[RetrievalResult] = field(default_factory=list)
     question: str = ""
+    invalid_source_references: list[int] = field(default_factory=list)
 
     @property
     def source_files(self) -> list[str]:
@@ -159,20 +162,51 @@ class RAGPipeline:
                 question=question,
             )
 
-        # 3. Build prompt from retrieved chunks
-        prompt = self.prompt_builder(question=question, context=sources)
+        # 3. Build relationship facts only from the configured repository graph
+        # and the source locations returned by retrieval. Custom prompt builders
+        # retain their existing two-argument contract for backward compatibility.
+        graph = getattr(self.retriever, "repository_graph", None)
+        # Answer explicit caller/callee questions directly from graph evidence.
+        # All other questions continue through the existing RAG pipeline.
+        if graph is not None:
+            relationship_answer = answer_relationship_question(
+                question=question,
+                graph=graph,
+                sources=list(sources),
+            )
+            if relationship_answer is not None:
+                return RAGResult(
+                    answer=relationship_answer,
+                    sources=list(sources),
+                    question=question,
+                )
+        relationship_context = build_relationship_context(question, sources, graph)
+
+        if self.prompt_builder is build_rag_prompt:
+            prompt = self.prompt_builder(
+                question=question,
+                context=sources,
+                relationship_context=relationship_context,
+            )
+        else:
+            prompt = self.prompt_builder(question=question, context=sources)
 
         # 4. Generate answer with LLM
         gen_kwargs: dict[str, Any] = {}
         if temperature is not None:
             gen_kwargs["temperature"] = temperature
 
-        answer_text = self.llm.generate(prompt, **gen_kwargs)
+        generated_answer = self.llm.generate(prompt, **gen_kwargs)
+
+        # Phase 2E: validate explicit source markers against the actual retrieved
+        # source list. This is a reference-integrity check, not semantic proof.
+        citation_result = validate_source_citations(generated_answer, len(sources))
 
         return RAGResult(
-            answer=answer_text,
+            answer=citation_result.answer,
             sources=list(sources),
             question=question,
+            invalid_source_references=list(citation_result.invalid_source_references),
         )
 
     # ----- Foundation compatibility methods ------------------------------- #
