@@ -10,6 +10,7 @@ Provides a web interface to:
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import zipfile
 from collections.abc import Callable
@@ -22,7 +23,9 @@ from config import settings
 from src.chunker import CodeChunker
 from src.embedder import Embedder
 from src.llm import LLM, LLMConnectionError, LLMError, LLMResponseError
-from src.parser import CodeParser
+from src.parser import CodeParser, ParsedFile
+from src.repository_graph import RepositoryGraph, build_repository_graph
+from src.graph_retrieval import build_graph_chunk_lookup
 from src.rag_pipeline import (
     NO_CONTEXT_MESSAGE,
     RAGInputError,
@@ -102,6 +105,7 @@ def index_codebase_files(
     embedder: Embedder,
     vector_store: VectorStore,
     progress_callback: Optional[Callable[[str, float], None]] = None,
+    graph_context_callback: Optional[Callable[[RepositoryGraph, dict[str, RetrievalResult]], None]] = None,
 ) -> tuple[int, int]:
     """Parse, chunk, embed, and store code files in ChromaDB."""
     py_files = [p for p in file_paths if p.is_file() and p.suffix.lower() == ".py"]
@@ -115,12 +119,14 @@ def index_codebase_files(
         progress_callback("Parsing codebase files...", 0.1)
 
     all_chunks = []
+    parsed_sources: list[ParsedFile] = []
     parsed_files = 0
     for p in py_files:
         try:
             parsed = parser.parse_file(p)
             chunks = chunker.chunk(parsed)
             all_chunks.extend(chunks)
+            parsed_sources.append(parsed)
             parsed_files += 1
         except Exception as exc:
             logger.warning("Could not parse file %s: %s", p, exc)
@@ -138,6 +144,16 @@ def index_codebase_files(
 
     vector_store.clear()
     vector_store.add_chunks(all_chunks, embeddings)
+
+    if graph_context_callback is not None:
+        try:
+            common_root = Path(os.path.commonpath([str(Path(item.path).resolve().parent) for item in parsed_sources]))
+            graph = build_repository_graph(parsed_sources, root=common_root)
+            chunk_lookup = build_graph_chunk_lookup(graph, all_chunks)
+            graph_context_callback(graph, chunk_lookup)
+        except Exception as exc:
+            # Vector retrieval remains available if optional graph preparation fails.
+            logger.warning("Could not prepare graph retrieval context: %s", exc)
 
     if progress_callback:
         progress_callback("Indexing complete!", 1.0)
@@ -182,7 +198,13 @@ def get_pipeline() -> RAGPipeline:
     embedder = get_embedder()
     store = get_vector_store()
     llm = get_llm()
-    retriever = Retriever(embedder=embedder, vector_store=store)
+    graph = st.session_state.get("repository_graph")
+    graph_chunk_lookup = st.session_state.get("graph_chunk_lookup")
+    retriever_kwargs: dict[str, Any] = {}
+    if graph is not None and graph_chunk_lookup:
+        retriever_kwargs["repository_graph"] = graph
+        retriever_kwargs["graph_chunk_lookup"] = graph_chunk_lookup
+    retriever = Retriever(embedder=embedder, vector_store=store, **retriever_kwargs)
     return RAGPipeline(retriever=retriever, llm=llm)
 
 
@@ -228,8 +250,16 @@ def render_upload() -> None:
             embedder = get_embedder()
             store = get_vector_store()
 
+            def save_graph_context(graph: RepositoryGraph, chunk_lookup: dict[str, RetrievalResult]) -> None:
+                st.session_state["repository_graph"] = graph
+                st.session_state["graph_chunk_lookup"] = chunk_lookup
+
             num_files, num_chunks = index_codebase_files(
-                saved_paths, embedder, store, progress_callback=update_progress
+                saved_paths,
+                embedder,
+                store,
+                progress_callback=update_progress,
+                graph_context_callback=save_graph_context,
             )
 
             st.session_state["indexed"] = True

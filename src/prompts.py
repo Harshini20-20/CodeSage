@@ -21,7 +21,8 @@ Instructions:
 3. If the retrieved context is insufficient to answer the question completely or accurately, state clearly what is missing.
 4. Reference specific file names, line numbers, functions, and classes from the context where relevant.
 5. Never claim that code was executed or run. Code is analyzed statically as text.
-6. Provide clear, concise, and technically accurate explanations.
+6. Some sources may be included because the repository graph links them to a semantic search result. Treat these as related context, not proof that a call executes at runtime.
+7. Provide clear, concise, and technically accurate explanations.
 
 --- CODE CONTEXT ---
 {context}
@@ -50,6 +51,9 @@ def format_context_chunk(result: RetrievalResult, index: int = 1) -> str:
         header_parts.append(f"Name: {name}")
     if lines_str:
         header_parts.append(lines_str)
+    graph_relation = (getattr(result, "metadata", {}) or {}).get("graph_relation")
+    if graph_relation:
+        header_parts.append(f"Related via repository graph: {graph_relation}")
 
     header = "\n".join(header_parts)
     content = result.content.strip() if hasattr(result, "content") else str(result).strip()

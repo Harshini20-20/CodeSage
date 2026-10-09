@@ -88,6 +88,22 @@ class ImportInfo:
 
 
 @dataclass
+class CallInfo:
+    """Static metadata for one function or method call expression.
+
+    ``caller`` is the qualified name of the function/method whose body contains
+    this call. ``line`` is the 1-based source line of the call expression.
+    ``target`` is populated only when a unique same-module definition can be
+    identified statically; unresolved and dynamic targets remain ``None``.
+    """
+
+    name: str
+    line: int
+    caller: str
+    target: Optional[str] = None  # resolved qualified name, when unambiguous
+
+
+@dataclass
 class CodeElement:
     """A function, class or method found in a file."""
 
@@ -103,6 +119,9 @@ class CodeElement:
     docstring: Optional[str] = None
     is_async: bool = False
     methods: list["CodeElement"] = field(default_factory=list)  # classes only
+    calls: list[str] = field(default_factory=list)  # backwards-compatible call names
+    call_infos: list[CallInfo] = field(default_factory=list)  # structured call metadata
+    base_classes: list[str] = field(default_factory=list)  # classes only; statically visible bases
 
 
 @dataclass
@@ -283,6 +302,7 @@ class CodeParser:
                 parsed.functions.append(self._make_element(node, "function", path, language, lines))
             elif isinstance(node, ast.ClassDef):
                 parsed.classes.append(self._make_class(node, path, language, lines))
+        self._resolve_local_call_targets(parsed)
         logger.info(
             "Parsed %s: %d import(s), %d function(s), %d class(es)",
             path.name, len(parsed.imports), len(parsed.functions), len(parsed.classes),
@@ -308,10 +328,21 @@ class CodeParser:
         parent: Optional[str] = None,
     ) -> CodeElement:
         start, end = self._span(node)
+        qualified_name = f"{parent}.{node.name}" if parent else node.name
+        call_infos = (
+            self._extract_call_infos(node, qualified_name)
+            if kind in ("function", "method")
+            else []
+        )
+        base_classes = (
+            [name for base in node.bases if (name := self._call_name(base)) is not None]
+            if kind == "class" and isinstance(node, ast.ClassDef)
+            else []
+        )
         return CodeElement(
             kind=kind,
             name=node.name,
-            qualified_name=f"{parent}.{node.name}" if parent else node.name,
+            qualified_name=qualified_name,
             start_line=start,
             end_line=end,
             source="\n".join(lines[start - 1:end]),
@@ -320,7 +351,108 @@ class CodeParser:
             parent=parent,
             docstring=ast.get_docstring(node),
             is_async=isinstance(node, ast.AsyncFunctionDef),
+            calls=[info.name for info in call_infos],
+            call_infos=call_infos,
+            base_classes=base_classes,
         )
+
+    @staticmethod
+    def _call_name(func: ast.expr) -> Optional[str]:
+        """Return a statically visible call name, or ``None`` if dynamic."""
+        if isinstance(func, ast.Name):
+            return func.id
+        if not isinstance(func, ast.Attribute):
+            return None
+
+        parts = [func.attr]
+        value = func.value
+        while isinstance(value, ast.Attribute):
+            parts.append(value.attr)
+            value = value.value
+        if isinstance(value, ast.Name):
+            parts.append(value.id)
+            return ".".join(reversed(parts))
+        return None
+
+    @staticmethod
+    def _extract_call_infos(
+        node: Union[ast.FunctionDef, ast.AsyncFunctionDef], caller: str
+    ) -> list[CallInfo]:
+        """Return structured call metadata in source traversal order.
+
+        Repeated calls are preserved. Nested function, async-function, class,
+        and lambda bodies are excluded so calls are attributed to their own
+        element/scope. Calls inside async function bodies are still collected.
+        Only syntactically identifiable names are recorded; no code is run.
+        """
+        class CallVisitor(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.calls: list[CallInfo] = []
+
+            def visit_Call(self, call: ast.Call) -> None:
+                name = CodeParser._call_name(call.func)
+                if name is not None:
+                    self.calls.append(CallInfo(name=name, line=call.lineno, caller=caller))
+                self.generic_visit(call)
+
+            def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+                return
+
+            def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+                return
+
+            def visit_ClassDef(self, child: ast.ClassDef) -> None:
+                return
+
+            def visit_Lambda(self, child: ast.Lambda) -> None:
+                return
+
+        visitor = CallVisitor()
+        for statement in node.body:
+            visitor.visit(statement)
+        return visitor.calls
+
+    @staticmethod
+    def _extract_calls(node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> list[str]:
+        """Backward-compatible helper returning only call names."""
+        return [info.name for info in CodeParser._extract_call_infos(node, node.name)]
+
+    @staticmethod
+    def _resolve_local_call_targets(parsed: ParsedFile) -> None:
+        """Resolve only unambiguous calls to definitions in the same module.
+
+        This is deliberately conservative: imported symbols, dynamic receivers,
+        inheritance dispatch, and duplicate definitions are not inferred. The
+        resolver records possible static relationships; it never executes code.
+        """
+        functions_by_name: dict[str, list[CodeElement]] = {}
+        classes_by_name: dict[str, list[CodeElement]] = {}
+        for function in parsed.functions:
+            functions_by_name.setdefault(function.name, []).append(function)
+        for cls in parsed.classes:
+            classes_by_name.setdefault(cls.name, []).append(cls)
+
+        for element in parsed.elements:
+            for call in element.call_infos:
+                parts = call.name.split(".")
+                target: Optional[str] = None
+                if len(parts) == 1:
+                    candidates = functions_by_name.get(parts[0], [])
+                    if len(candidates) == 1:
+                        target = candidates[0].qualified_name
+                elif len(parts) == 2 and parts[0] in {"self", "cls"} and element.kind == "method" and element.parent:
+                    owner_matches = classes_by_name.get(element.parent, [])
+                    if len(owner_matches) == 1:
+                        method_candidates = [m for m in owner_matches[0].methods if m.name == parts[1]]
+                        if len(method_candidates) == 1:
+                            target = method_candidates[0].qualified_name
+                elif len(parts) == 2 and parts[0] in classes_by_name:
+                    class_candidates = classes_by_name[parts[0]]
+                    if len(class_candidates) == 1:
+                        method_candidates = [m for m in class_candidates[0].methods if m.name == parts[1]]
+                        if len(method_candidates) == 1:
+                            target = method_candidates[0].qualified_name
+                call.target = target
 
     def _make_class(self, node: ast.ClassDef, path: Path, language: str, lines: list[str]) -> CodeElement:
         cls = self._make_element(node, "class", path, language, lines)

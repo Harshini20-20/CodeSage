@@ -77,9 +77,19 @@ class Retriever:
             where each dict has ``id``, ``document``, ``metadata``, ``distance``.
     """
 
-    def __init__(self, embedder: Embedder, vector_store: VectorStore) -> None:
+    def __init__(
+        self,
+        embedder: Embedder,
+        vector_store: VectorStore,
+        repository_graph: Any = None,
+        graph_chunk_lookup: Optional[dict[str, RetrievalResult]] = None,
+        graph_expansion_limit: int = 3,
+    ) -> None:
         self.embedder = embedder
         self.vector_store = vector_store
+        self.repository_graph = repository_graph
+        self.graph_chunk_lookup = graph_chunk_lookup
+        self.graph_expansion_limit = self._validate_graph_expansion_limit(graph_expansion_limit)
 
     def retrieve(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[RetrievalResult]:
         """Return up to ``top_k`` chunks most relevant to ``query``.
@@ -96,9 +106,25 @@ class Retriever:
 
         embedding = self.embedder.embed_query(query)
         raw_results = self.vector_store.query(embedding, top_k=top_k)
-        return [self._to_result(raw) for raw in raw_results]
+        results = [self._to_result(raw) for raw in raw_results]
+        if self.repository_graph is not None and self.graph_chunk_lookup:
+            from src.graph_retrieval import expand_with_graph
+
+            return expand_with_graph(
+                results,
+                self.repository_graph,
+                self.graph_chunk_lookup,
+                limit=self.graph_expansion_limit,
+            )
+        return results
 
     # ----- internals ------------------------------------------------------- #
+    @staticmethod
+    def _validate_graph_expansion_limit(limit: Any) -> int:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("graph_expansion_limit must be a non-negative integer.")
+        return limit
+
     @staticmethod
     def _validate_query(query: Any) -> None:
         if not isinstance(query, str):

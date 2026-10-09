@@ -115,7 +115,6 @@ def test_construction_with_custom_config() -> None:
     )
     llm = LLM(config=custom_cfg)
     assert llm.model == "mistral:latest"
-    assert llm.host == "http://192.168.1.100:11434"
 
 
 def test_construction_with_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:

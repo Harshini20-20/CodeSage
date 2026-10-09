@@ -291,3 +291,172 @@ def test_parse_directory_errors(tmp_path):
 
 def test_is_supported():
     assert CodeParser.is_supported("a.py") and not CodeParser.is_supported("a.js")
+
+
+def test_extracts_direct_dotted_and_repeated_function_calls(tmp_path):
+    f = tmp_path / "calls.py"
+    f.write_text(
+        "import math\n"
+        "def calculate_total(price, tax):\n"
+        "    add_tax(price, tax)\n"
+        "    add_tax(price, tax)\n"
+        "    math.sqrt(price)\n"
+        "    return helpers.money.round_total(price)\n",
+        encoding="utf-8",
+    )
+    parsed = CodeParser().parse_file(f)
+    assert parsed.functions[0].calls == [
+        "add_tax", "add_tax", "math.sqrt", "helpers.money.round_total"
+    ]
+
+
+def test_extracts_method_calls_and_self_calls(tmp_path):
+    f = tmp_path / "methods.py"
+    f.write_text(
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        self.prepare()\n"
+        "        service.execute()\n"
+        "    def prepare(self):\n"
+        "        initialize()\n",
+        encoding="utf-8",
+    )
+    parsed = CodeParser().parse_file(f)
+    run, prepare = parsed.classes[0].methods
+    assert run.calls == ["self.prepare", "service.execute"]
+    assert prepare.calls == ["initialize"]
+    assert parsed.classes[0].calls == []
+
+
+def test_nested_function_calls_are_not_attributed_to_outer_function(tmp_path):
+    f = tmp_path / "nested.py"
+    f.write_text(
+        "def outer():\n"
+        "    before()\n"
+        "    def inner():\n"
+        "        nested_only()\n"
+        "    after()\n",
+        encoding="utf-8",
+    )
+    parsed = CodeParser().parse_file(f)
+    assert parsed.functions[0].calls == ["before", "after"]
+
+
+def test_structured_call_metadata_includes_name_line_and_caller(tmp_path):
+    f = tmp_path / "call_metadata.py"
+    f.write_text(
+        "def calculate():\n"
+        "    validate()\n"
+        "    math.sqrt(25)\n",
+        encoding="utf-8",
+    )
+
+    parsed = CodeParser().parse_file(f)
+    element = parsed.functions[0]
+
+    assert element.calls == ["validate", "math.sqrt"]
+    assert [(call.name, call.line, call.caller) for call in element.call_infos] == [
+        ("validate", 2, "calculate"),
+        ("math.sqrt", 3, "calculate"),
+    ]
+
+
+def test_structured_call_metadata_uses_qualified_method_name_and_async_body(tmp_path):
+    f = tmp_path / "async_calls.py"
+    f.write_text(
+        "class Worker:\n"
+        "    async def run(self):\n"
+        "        await self.prepare()\n"
+        "    def prepare(self):\n"
+        "        initialize()\n",
+        encoding="utf-8",
+    )
+
+    parsed = CodeParser().parse_file(f)
+    run, prepare = parsed.classes[0].methods
+
+    assert [(call.name, call.line, call.caller) for call in run.call_infos] == [
+        ("self.prepare", 3, "Worker.run")
+    ]
+    assert [(call.name, call.line, call.caller) for call in prepare.call_infos] == [
+        ("initialize", 5, "Worker.prepare")
+    ]
+
+
+def test_nested_call_expressions_keep_each_call_line(tmp_path):
+    f = tmp_path / "nested_calls.py"
+    f.write_text(
+        "def calculate():\n"
+        "    return outer(inner())\n",
+        encoding="utf-8",
+    )
+
+    element = CodeParser().parse_file(f).functions[0]
+    assert [(call.name, call.line, call.caller) for call in element.call_infos] == [
+        ("outer", 2, "calculate"),
+        ("inner", 2, "calculate"),
+    ]
+
+
+def test_phase2a_resolves_unique_local_function_and_method_targets(tmp_path):
+    f = tmp_path / "relationships.py"
+    f.write_text(
+        "def validate():\n"
+        "    pass\n"
+        "\n"
+        "class Worker(BaseWorker):\n"
+        "    def run(self):\n"
+        "        validate()\n"
+        "        self.prepare()\n"
+        "        Worker.finish()\n"
+        "    def prepare(self):\n"
+        "        pass\n"
+        "    @classmethod\n"
+        "    def finish(cls):\n"
+        "        cls.prepare()\n",
+        encoding="utf-8",
+    )
+
+    parsed = CodeParser().parse_file(f)
+    worker = parsed.classes[0]
+    run, prepare, finish = worker.methods
+
+    assert worker.base_classes == ["BaseWorker"]
+    assert [(c.name, c.target) for c in run.call_infos] == [
+        ("validate", "validate"),
+        ("self.prepare", "Worker.prepare"),
+        ("Worker.finish", "Worker.finish"),
+    ]
+    assert [(c.name, c.target) for c in finish.call_infos] == [("cls.prepare", "Worker.prepare")]
+
+
+def test_phase2a_leaves_ambiguous_and_external_calls_unresolved(tmp_path):
+    f = tmp_path / "ambiguous.py"
+    f.write_text(
+        "def same():\n    pass\n"
+        "def same():\n    pass\n"
+        "class A:\n    def run(self):\n        same()\n        external.call()\n        dynamic().call()\n",
+        encoding="utf-8",
+    )
+
+    parsed = CodeParser().parse_file(f)
+    calls = parsed.classes[0].methods[0].call_infos
+    assert [(c.name, c.target) for c in calls] == [
+        ("same", None),
+        ("external.call", None),
+        ("dynamic", None),
+    ]
+
+
+def test_phase2a_does_not_resolve_inherited_methods_by_guessing(tmp_path):
+    f = tmp_path / "inheritance.py"
+    f.write_text(
+        "class Base:\n    def inherited(self):\n        pass\n"
+        "class Child(Base):\n    def run(self):\n        self.inherited()\n",
+        encoding="utf-8",
+    )
+
+    parsed = CodeParser().parse_file(f)
+    child = parsed.classes[1]
+    assert child.base_classes == ["Base"]
+    assert child.methods[0].call_infos[0].target is None
