@@ -23,6 +23,20 @@ Instructions:
 5. Never claim that code was executed or run. Code is analyzed statically as text.
 6. Some sources may be included because the repository graph links them to a semantic search result. Treat these as related context, not proof that a call executes at runtime.
 7. Provide clear, concise, and technically accurate explanations.
+8. For factual claims grounded in a source, cite its label exactly as [SOURCE 1], [SOURCE 2], etc. Use only labels that appear in CODE CONTEXT.
+9. When useful, include the source file and line range shown in the cited source header. Never invent a file path, line number, or source label.
+10. If the evidence does not support a claim, state the limitation rather than adding a citation that only looks plausible.
+11. Treat repository relationship context as static-analysis evidence, not proof of runtime execution.
+12. Only call a relationship confirmed when the supplied relationship context labels it CONFIRMED.
+13. Describe unresolved calls as unresolved; never guess their targets or claim a path is complete when evidence is missing.
+14. Distinguish direct calls from indirect multi-step paths, and mention uncertainty or missing graph coverage when relevant.
+15. Do not infer a relationship merely because two code snippets appear together in the context.
+16. For questions asking "which functions call X" or "who calls X", report only confirmed call relationships whose TARGET is X and whose SOURCE is the calling function. Do not include functions that call other functions merely because they appear in the same file or context.
+17. For questions asking "which functions does X call", report only confirmed call relationships whose SOURCE is X and whose TARGET is the called function. Never reverse a call edge. If no matching confirmed edge is provided, state that no confirmed caller/callee relationship was found in the supplied graph context rather than guessing.
+18. An UNRESOLVED call means the call exists in the analyzed source, but its target could not be resolved to a repository definition. Do not describe it as a nonexistent call. When the source code shows the call expression, acknowledge that the call occurs even if the graph cannot resolve its target.
+
+--- REPOSITORY RELATIONSHIP CONTEXT ---
+{relationship_context}
 
 --- CODE CONTEXT ---
 {context}
@@ -85,14 +99,19 @@ def build_rag_prompt(
     question: str,
     context: Union[str, Sequence[Union[RetrievalResult, str, Any]]],
     template: str = EXPLANATION_PROMPT_TEMPLATE,
+    relationship_context: str = "No repository relationship evidence is available for this question.",
 ) -> str:
-    """Build a complete prompt for the LLM from question and context."""
+    """Build a complete prompt from code evidence and optional graph facts."""
     if isinstance(context, str):
         context_str = context
     else:
         context_str = format_context(context)
 
-    return template.format(context=context_str, question=question.strip())
+    return template.format(
+        context=context_str,
+        question=question.strip(),
+        relationship_context=relationship_context,
+    )
 
 
 def build_explanation_prompt(
