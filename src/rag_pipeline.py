@@ -26,6 +26,7 @@ Design notes
 
 from __future__ import annotations
 from src.relationship_answers import answer_relationship_question
+from src.call_path_answers import answer_call_path_question
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
@@ -180,6 +181,18 @@ class RAGPipeline:
                     sources=list(sources),
                     question=question,
                 )
+
+            call_path_answer = answer_call_path_question(
+                question=question,
+                graph=graph,
+            )
+            if call_path_answer is not None:
+                return RAGResult(
+                    answer=call_path_answer,
+                    sources=list(sources),
+                    question=question,
+                )
+
         relationship_context = build_relationship_context(question, sources, graph)
 
         if self.prompt_builder is build_rag_prompt:
